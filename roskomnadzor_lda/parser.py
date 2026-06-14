@@ -103,7 +103,6 @@ class SafeRKNParser:
                     if response.status == 200:
                         self.successful_requests += 1
                         content = await response.text()
-                        print(f"✅ [{self.successful_requests}] {url[:80]}...")
                         return content
                     
                     elif response.status == 403:
@@ -172,44 +171,69 @@ class SafeRKNParser:
         return news_items
     
     async def parse_article(self, article_url: str) -> Optional[Dict]:
-        """Парсит отдельную статью"""
+        """Парсит отдельную статью с извлечением даты"""
         html = await self._fetch_with_retry(article_url)
         if not html:
             return None
         
         soup = BeautifulSoup(html, "lxml")
         
-        # Отладка
-        h1_tag = soup.select_one("div.inner-page-body-content.widthMenu h1")
-        if h1_tag:
-            print(f"🔍 Найден H1: {h1_tag.get_text(strip=True)[:80]}...")
-        else:
-            print(f"⚠️ H1 не найден для {article_url}")
-            
-        # Ищем текст статьи (несколько вариантов селекторов)
-        content = None
-        selectors = [
-            "div.text_content.bordernone",
-            "div.text_content",
-            "div.news-text",
-            "article.content",
-            "div.content-text"
-        ]
+        # 1. ИЗВЛЕЧЕНИЕ ЗАГОЛОВКА
+        title = ""
+        parent_div = soup.find("div", class_="inner-page-body-content widthMenu")
+        if parent_div:
+            h1_tag = parent_div.find("h1")
+            if h1_tag:
+                title = h1_tag.get_text(strip=True)
         
-        for selector in selectors:
-            content_div = soup.select_one(selector)
-            if content_div:
-                content = content_div
-                break
+        if not title:
+            h1_tag = soup.find("h1")
+            if h1_tag:
+                title = h1_tag.get_text(strip=True)
+        
+        # 2. ИЗВЛЕЧЕНИЕ ДАТЫ И ТЕКСТА
+        content_div = soup.find("div", class_="text_content bordernone")
         
         full_text = ""
-        if content:
-            paragraphs = content.find_all("p")
+        publish_date = None
+        
+        if content_div:
+            # Извлекаем дату из <h3>
+            date_h3 = content_div.find("h3")
+            if date_h3:
+                date_text = date_h3.get_text(strip=True)
+                import re
+                # Формат: "2 июня 2026 года" или "2 июня 2026 г."
+                match = re.search(r'(\d{1,2})\s+(\w+)\s+(\d{4})', date_text)
+                if match:
+                    day, month_ru, year = match.groups()
+                    months = {
+                        'января': '01', 'февраля': '02', 'марта': '03', 'апреля': '04',
+                        'мая': '05', 'июня': '06', 'июля': '07', 'августа': '08',
+                        'сентября': '09', 'октября': '10', 'ноября': '11', 'декабря': '12'
+                    }
+                    month = months.get(month_ru.lower(), '01')
+                    publish_date = f"{day.zfill(2)}.{month}.{year}"
+            
+            # Извлекаем текст статьи (все параграфы)
+            paragraphs = content_div.find_all("p")
             full_text = "\n".join(p.get_text(strip=True) for p in paragraphs)
+        
+        # Запасной вариант для даты
+        if not publish_date:
+            import re
+            small_tags = soup.find_all("small")
+            for tag in small_tags:
+                text = tag.get_text(strip=True)
+                match = re.search(r'(\d{2}\.\d{2}\.\d{4})', text)
+                if match:
+                    publish_date = match.group(1)
+                    break
         
         return {
             "full_text": full_text,
-            "title": h1_tag.get_text(strip=True) if h1_tag else ""
+            "title": title,
+            "publish_date": publish_date
         }
     
     async def collect_all_links(self, start_offset: int = 0, max_pages: int = 100) -> List[Dict]:
@@ -255,11 +279,12 @@ class SafeRKNParser:
                 article_data = await self.parse_article(news_item["url"])
                 if article_data:
                     news_item["full_text"] = article_data.get("full_text", "")
-                    # Если заголовок из статьи лучше, обновляем
+                    news_item["publish_date"] = article_data.get("publish_date")  # ✅ ДОБАВИТЬ
                     if article_data.get("title"):
                         news_item["title"] = article_data["title"]
                 else:
                     news_item["full_text"] = ""
+                    news_item["publish_date"] = None  # ✅ ДОБАВИТЬ
                 
                 await self._smart_delay()
                 return news_item
